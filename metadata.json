@@ -1,0 +1,5 @@
+{
+  "name": "DP World Jebel Ali Terminal Dashboard",
+  "description": "A professional port management dashboard for creating and managing container pre-plan tokens at Jebel Ali Port.",
+  "requestFramePermissions": ["camera"]
+}
