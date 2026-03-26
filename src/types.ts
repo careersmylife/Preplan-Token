@@ -13,6 +13,7 @@ export interface HistoryEntry {
   timestamp: string;
   user: string;
   note?: string;
+  gateId?: string;
 }
 
 export interface Token {
@@ -21,10 +22,36 @@ export interface Token {
   truckPlate: string;
   driverName: string;
   appointmentTime: string;
+  expiryDate: string;
   type: 'Import' | 'Export';
   status: 'Active' | 'Used' | 'Expired' | 'Cancelled';
   qrCode: string;
   history: HistoryEntry[];
+  ocrData?: {
+    billOfLading?: string;
+    manifestId?: string;
+    extractedAt: string;
+  };
+}
+
+export interface Notification {
+  id: string;
+  type: 'info' | 'warning' | 'success' | 'error';
+  message: string;
+  timestamp: string;
+  read: boolean;
+  tokenId?: string;
+}
+
+export interface GateEvent {
+  id: string;
+  tokenId: string;
+  containerNumber: string;
+  truckPlate: string;
+  driverName: string;
+  type: 'Used' | 'Cancelled';
+  timestamp: string;
+  gateId: string;
 }
 
 export interface DashboardStats {

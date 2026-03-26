@@ -15,12 +15,18 @@ export const MOCK_TOKENS: Token[] = [
     truckPlate: 'DXB-A-12345',
     driverName: 'Ahmed Hassan',
     appointmentTime: '2026-03-26T10:00:00Z',
+    expiryDate: '2026-03-27T10:00:00Z',
     type: 'Export',
     status: 'Active',
     qrCode: 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=TKN-8821-XP',
     history: [
       { status: 'Active', timestamp: '2026-03-25T08:00:00Z', user: 'Terminal Manager', note: 'Token generated' }
-    ]
+    ],
+    ocrData: {
+      billOfLading: 'BL-9988776655',
+      manifestId: 'MF-12345',
+      extractedAt: '2026-03-25T08:05:00Z'
+    }
   },
   {
     id: 'TKN-4432-LQ',
@@ -28,6 +34,7 @@ export const MOCK_TOKENS: Token[] = [
     truckPlate: 'SHJ-B-99887',
     driverName: 'John Doe',
     appointmentTime: '2026-03-26T14:30:00Z',
+    expiryDate: '2026-03-27T14:30:00Z',
     type: 'Import',
     status: 'Active',
     qrCode: 'https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=TKN-4432-LQ',

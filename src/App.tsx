@@ -16,26 +16,48 @@ import {
   XCircle, 
   Printer,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Filter,
   MoreVertical,
   Anchor,
   History,
   Scan,
   Calendar as CalendarIcon,
-  AlertCircle
+  AlertCircle,
+  FileText,
+  BellRing
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { format, isWithinInterval, parseISO, startOfDay, endOfDay } from 'date-fns';
-import { Container, Token, HistoryEntry } from './types';
+import { 
+  PieChart, 
+  Pie, 
+  Cell, 
+  ResponsiveContainer, 
+  Tooltip as RechartsTooltip,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid
+} from 'recharts';
+import { format, isWithinInterval, parseISO, startOfDay, endOfDay, addHours, isBefore } from 'date-fns';
+import { Container, Token, HistoryEntry, Notification, GateEvent } from './types';
 import { MOCK_CONTAINERS, MOCK_TOKENS } from './constants';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'containers' | 'tokens'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'containers' | 'tokens' | 'gate'>('dashboard');
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
   const [tokens, setTokens] = useState<Token[]>(MOCK_TOKENS);
+  const [gateActivity, setGateActivity] = useState<GateEvent[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTokenForHistory, setSelectedTokenForHistory] = useState<Token | null>(null);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [isManualGateModalOpen, setIsManualGateModalOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [isOcrProcessing, setIsOcrProcessing] = useState(false);
+  const [selectedTokenIds, setSelectedTokenIds] = useState<string[]>([]);
   const [statusUpdate, setStatusUpdate] = useState<{
     token: Token;
     newStatus: Token['status'];
@@ -72,15 +94,77 @@ export default function App() {
     setFormErrors(errors);
   }, [newTokenForm]);
 
+  // Gate Simulation: Randomly mark active tokens as Used
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const activeTokens = tokens.filter(t => t.status === 'Active');
+      if (activeTokens.length > 0 && Math.random() > 0.8) {
+        const randomToken = activeTokens[Math.floor(Math.random() * activeTokens.length)];
+        updateTokenStatus(randomToken.id, 'Used', 'Automatic gate entry detected');
+        
+        const newNotification: Notification = {
+          id: Math.random().toString(36).substring(7),
+          type: 'success',
+          message: `Gate Entry: Token ${randomToken.id} for ${randomToken.containerNumber} marked as Used.`,
+          timestamp: new Date().toISOString(),
+          read: false,
+          tokenId: randomToken.id
+        };
+        setNotifications(prev => [newNotification, ...prev]);
+      }
+    }, 15000); // Check every 15 seconds
+
+    return () => clearInterval(interval);
+  }, [tokens]);
+
+  // Expiry Warnings
+  useEffect(() => {
+    const checkExpiry = () => {
+      const now = new Date();
+      const warningThreshold = addHours(now, 1);
+      
+      tokens.forEach(t => {
+        if (t.status === 'Active') {
+          const apptTime = parseISO(t.appointmentTime);
+          if (isBefore(apptTime, warningThreshold) && isBefore(now, apptTime)) {
+            // Check if we already notified for this token
+            const alreadyNotified = notifications.some(n => n.tokenId === t.id && n.type === 'warning');
+            if (!alreadyNotified) {
+              const newNotification: Notification = {
+                id: Math.random().toString(36).substring(7),
+                type: 'warning',
+                message: `Expiry Warning: Token ${t.id} for ${t.containerNumber} expires in less than 1 hour.`,
+                timestamp: new Date().toISOString(),
+                read: false,
+                tokenId: t.id
+              };
+              setNotifications(prev => [newNotification, ...prev]);
+            }
+          } else if (isBefore(apptTime, now)) {
+            // Auto-expire
+            updateTokenStatus(t.id, 'Expired', 'Token expired automatically');
+          }
+        }
+      });
+    };
+
+    const interval = setInterval(checkExpiry, 60000); // Check every minute
+    checkExpiry();
+
+    return () => clearInterval(interval);
+  }, [tokens, notifications]);
+
   const handleCreateToken = (e: React.FormEvent) => {
     e.preventDefault();
     if (Object.keys(formErrors).length > 0) return;
 
     const id = `TKN-${Math.floor(1000 + Math.random() * 9000)}-${Math.random().toString(36).substring(2, 4).toUpperCase()}`;
     const now = new Date().toISOString();
+    const expiryDate = addHours(parseISO(newTokenForm.appointmentTime), 24).toISOString();
     const token: Token = {
       id,
       ...newTokenForm,
+      expiryDate,
       status: 'Active',
       qrCode: `https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${id}`,
       history: [
@@ -98,19 +182,56 @@ export default function App() {
     });
   };
 
-  const updateTokenStatus = (tokenId: string, newStatus: Token['status'], note?: string) => {
+  const updateTokenStatus = (tokenId: string, newStatus: Token['status'], note?: string, gateId?: string) => {
+    const token = tokens.find(t => t.id === tokenId);
+    if (!token) return;
+
+    const historyEntry: HistoryEntry = {
+      status: newStatus,
+      timestamp: new Date().toISOString(),
+      user: 'Terminal Manager',
+      note: note || `Status updated to ${newStatus}`,
+      gateId
+    };
+
     setTokens(prev => prev.map(t => {
       if (t.id === tokenId) {
-        const historyEntry: HistoryEntry = {
-          status: newStatus,
-          timestamp: new Date().toISOString(),
-          user: 'Terminal Manager',
-          note: note || `Status updated to ${newStatus}`
-        };
         return { ...t, status: newStatus, history: [...t.history, historyEntry] };
       }
       return t;
     }));
+
+    // Record gate activity and notification if used or cancelled
+    if (newStatus === 'Used' || newStatus === 'Cancelled') {
+      const gateEvent: GateEvent = {
+        id: Math.random().toString(36).substring(7),
+        tokenId: token.id,
+        containerNumber: token.containerNumber,
+        truckPlate: token.truckPlate,
+        driverName: token.driverName,
+        type: newStatus,
+        timestamp: new Date().toISOString(),
+        gateId: gateId || `GATE-${Math.floor(Math.random() * 5) + 1}`
+      };
+      setGateActivity(prevGate => [gateEvent, ...prevGate]);
+
+      const newNotification: Notification = {
+        id: Math.random().toString(36).substring(7),
+        type: newStatus === 'Used' ? 'success' : 'warning',
+        message: `${newStatus === 'Used' ? 'Gate Entry' : 'Token Cancelled'}: Token ${token.id} for ${token.containerNumber} marked as ${newStatus}.`,
+        timestamp: new Date().toISOString(),
+        read: false,
+        tokenId: token.id
+      };
+      setNotifications(prev => [newNotification, ...prev]);
+    }
+  };
+
+  const handleBulkAction = (action: 'Used' | 'Cancelled') => {
+    selectedTokenIds.forEach(id => {
+      updateTokenStatus(id, action, `Bulk action: ${action}`);
+    });
+    setSelectedTokenIds([]);
   };
 
   const filteredContainers = useMemo(() => {
@@ -124,7 +245,8 @@ export default function App() {
     return tokens.filter(t => {
       const matchesSearch = t.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
         t.containerNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.truckPlate.toLowerCase().includes(searchQuery.toLowerCase());
+        t.truckPlate.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        t.driverName.toLowerCase().includes(searchQuery.toLowerCase());
       
       const matchesStatus = tokenFilters.status === 'All' || t.status === tokenFilters.status;
       const matchesType = tokenFilters.type === 'All' || t.type === tokenFilters.type;
@@ -140,6 +262,52 @@ export default function App() {
       return matchesSearch && matchesStatus && matchesType && matchesDate;
     });
   }, [tokens, searchQuery, tokenFilters]);
+
+  const statusDistribution = useMemo(() => {
+    const counts = tokens.reduce((acc, t) => {
+      acc[t.status] = (acc[t.status] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+
+    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+  }, [tokens]);
+
+  const COLORS = {
+    Active: '#3b82f6',
+    Used: '#10b981',
+    Expired: '#f59e0b',
+    Cancelled: '#ef4444'
+  };
+
+  const simulateOcr = () => {
+    setIsOcrProcessing(true);
+    setTimeout(() => {
+      const mockOcrData = {
+        containerNumber: 'DPWU' + Math.floor(1000000 + Math.random() * 9000000),
+        truckPlate: 'DXB-' + ['A', 'B', 'C'][Math.floor(Math.random() * 3)] + '-' + Math.floor(10000 + Math.random() * 90000),
+        driverName: ['Saeed Ahmed', 'Omar Khalid', 'Zaid Ali'][Math.floor(Math.random() * 3)],
+        billOfLading: 'BL-' + Math.random().toString(36).substring(7).toUpperCase()
+      };
+      
+      setNewTokenForm(prev => ({
+        ...prev,
+        containerNumber: mockOcrData.containerNumber,
+        truckPlate: mockOcrData.truckPlate,
+        driverName: mockOcrData.driverName
+      }));
+      
+      setIsOcrProcessing(false);
+      
+      const newNotification: Notification = {
+        id: Math.random().toString(36).substring(7),
+        type: 'info',
+        message: 'OCR Success: Extracted data from document.',
+        timestamp: new Date().toISOString(),
+        read: false
+      };
+      setNotifications(prev => [newNotification, ...prev]);
+    }, 2000);
+  };
 
   return (
     <div className="flex h-screen bg-[#f4f7f9]">
@@ -174,7 +342,12 @@ export default function App() {
             active={activeTab === 'tokens'} 
             onClick={() => setActiveTab('tokens')} 
           />
-          <SidebarItem icon={<Truck size={20} />} label="Gate Activity" />
+          <SidebarItem 
+            icon={<Truck size={20} />} 
+            label="Gate Activity" 
+            active={activeTab === 'gate'}
+            onClick={() => setActiveTab('gate')}
+          />
         </nav>
 
         <div className="p-4 border-t border-blue-800/50">
@@ -209,10 +382,75 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
-            <button className="p-2 text-slate-500 hover:bg-slate-100 rounded-full relative transition-colors">
-              <Bell size={20} />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-orange-500 rounded-full border-2 border-white"></span>
-            </button>
+            <div className="relative">
+              <button 
+                onClick={() => setIsNotificationsOpen(!isNotificationsOpen)}
+                className="p-2 text-slate-500 hover:bg-slate-100 rounded-full relative transition-colors"
+              >
+                <Bell size={20} />
+                {notifications.some(n => !n.read) && (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-orange-500 rounded-full border-2 border-white"></span>
+                )}
+              </button>
+              
+              <AnimatePresence>
+                {isNotificationsOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setIsNotificationsOpen(false)} />
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                      className="absolute right-0 mt-2 w-80 bg-white border border-slate-200 rounded-xl shadow-2xl z-20 overflow-hidden"
+                    >
+                      <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                        <h4 className="font-bold text-slate-800">Notifications</h4>
+                        <button 
+                          onClick={() => setNotifications(prev => prev.map(n => ({ ...n, read: true })))}
+                          className="text-[10px] font-bold text-blue-600 uppercase hover:underline"
+                        >
+                          Mark all as read
+                        </button>
+                      </div>
+                      <div className="max-h-96 overflow-y-auto">
+                        {notifications.length === 0 ? (
+                          <div className="p-8 text-center text-slate-400">
+                            <BellRing size={32} className="mx-auto mb-2 opacity-20" />
+                            <p className="text-xs">No notifications yet</p>
+                          </div>
+                        ) : (
+                          notifications.map(n => (
+                            <div 
+                              key={n.id} 
+                              className={`p-4 border-b border-slate-50 hover:bg-slate-50 transition-colors cursor-pointer ${!n.read ? 'bg-blue-50/30' : ''}`}
+                              onClick={() => {
+                                if (n.tokenId) {
+                                  const token = tokens.find(t => t.id === n.tokenId);
+                                  if (token) setSelectedTokenForHistory(token);
+                                }
+                                setNotifications(prev => prev.map(notif => notif.id === n.id ? { ...notif, read: true } : notif));
+                              }}
+                            >
+                              <div className="flex gap-3">
+                                <div className={`mt-1 shrink-0 w-2 h-2 rounded-full ${
+                                  n.type === 'warning' ? 'bg-amber-500' : 
+                                  n.type === 'success' ? 'bg-emerald-500' : 
+                                  'bg-blue-500'
+                                }`} />
+                                <div className="space-y-1">
+                                  <p className="text-xs text-slate-700 leading-relaxed">{n.message}</p>
+                                  <p className="text-[10px] text-slate-400">{format(parseISO(n.timestamp), 'HH:mm')}</p>
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+            </div>
             <button 
               onClick={() => setIsTokenModalOpen(true)}
               className="flex items-center gap-2 bg-[#ff6a00] hover:bg-[#e65f00] text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm active:scale-95"
@@ -278,51 +516,69 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                  {/* Recent Activity */}
+                  {/* Recent Gate Activity */}
                   <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                     <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                      <h3 className="font-bold text-slate-800">Recent Container Movements</h3>
-                      <button className="text-xs font-bold text-blue-600 hover:underline">View All</button>
+                      <h3 className="font-bold text-slate-800">Recent Gate Activity</h3>
+                      <button 
+                        onClick={() => setActiveTab('gate')}
+                        className="text-xs font-bold text-blue-600 hover:underline flex items-center gap-1"
+                      >
+                        View All <ChevronRight size={14} />
+                      </button>
                     </div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-left">
                         <thead>
                           <tr className="bg-slate-50">
+                            <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Timestamp</th>
+                            <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Token ID</th>
                             <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Container</th>
-                            <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Vessel</th>
-                            <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Status</th>
-                            <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Location</th>
+                            <th className="px-6 py-3 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Event</th>
                             <th className="px-6 py-3"></th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {MOCK_CONTAINERS.slice(0, 4).map((c) => (
-                            <tr key={c.id} className="hover:bg-slate-50 transition-colors group">
-                              <td className="px-6 py-4">
-                                <div className="flex flex-col">
-                                  <span className="font-mono font-bold text-slate-900">{c.number}</span>
-                                  <span className="text-xs text-slate-500">{c.size} • {c.type}</span>
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 text-sm text-slate-600 font-medium">{c.vessel || 'N/A'}</td>
-                              <td className="px-6 py-4">
-                                <span className={`status-badge ${
-                                  c.status === 'In Yard' ? 'bg-blue-100 text-blue-700' : 
-                                  c.status === 'Discharged' ? 'bg-emerald-100 text-emerald-700' :
-                                  c.status === 'At Sea' ? 'bg-slate-100 text-slate-600' :
-                                  'bg-amber-100 text-amber-700'
-                                }`}>
-                                  {c.status}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4 text-sm text-slate-500 font-mono">{c.location || '--'}</td>
-                              <td className="px-6 py-4 text-right">
-                                <button className="p-1 text-slate-400 hover:text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <ChevronRight size={18} />
-                                </button>
+                          {gateActivity.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} className="px-6 py-12 text-center text-slate-400 italic text-sm">
+                                No recent gate activity recorded
                               </td>
                             </tr>
-                          ))}
+                          ) : (
+                            gateActivity.slice(0, 5).map((event) => (
+                              <tr key={event.id} className="hover:bg-slate-50 transition-colors group">
+                                <td className="px-6 py-4 text-xs font-medium text-slate-500">
+                                  {format(parseISO(event.timestamp), 'HH:mm:ss')}
+                                </td>
+                                <td className="px-6 py-4 text-xs font-mono font-bold text-blue-600">{event.tokenId}</td>
+                                <td className="px-6 py-4">
+                                  <div className="flex flex-col">
+                                    <span className="font-mono font-bold text-slate-900">{event.containerNumber}</span>
+                                    <span className="text-[10px] text-slate-500">{event.truckPlate}</span>
+                                  </div>
+                                </td>
+                                <td className="px-6 py-4">
+                                  <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                                    event.type === 'Used' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                                  }`}>
+                                    {event.type}
+                                  </span>
+                                </td>
+                                <td className="px-6 py-4 text-right">
+                                  <button 
+                                    onClick={() => {
+                                      const token = tokens.find(t => t.id === event.tokenId);
+                                      if (token) setSelectedTokenForHistory(token);
+                                    }}
+                                    className="p-1 text-slate-400 hover:text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                                  >
+                                    <History size={18} />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))
+                          )}
                         </tbody>
                       </table>
                     </div>
@@ -465,6 +721,14 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-3">
                     <button 
+                      onClick={simulateOcr}
+                      disabled={isOcrProcessing}
+                      className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-all shadow-sm disabled:opacity-50"
+                    >
+                      <FileText size={18} className={isOcrProcessing ? 'animate-pulse' : ''} />
+                      {isOcrProcessing ? 'Processing...' : 'OCR Scan'}
+                    </button>
+                    <button 
                       onClick={() => setIsScannerOpen(true)}
                       className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-all shadow-sm"
                     >
@@ -481,7 +745,77 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Filters */}
+                {/* Status Overview Chart */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  <div className="lg:col-span-2 bg-white p-6 rounded-xl border border-slate-200 shadow-sm">
+                    <div className="flex items-center justify-between mb-6">
+                      <h3 className="font-bold text-slate-800">Token Status Distribution</h3>
+                      <div className="flex gap-4">
+                        {Object.entries(COLORS).map(([status, color]) => (
+                          <div key={status} className="flex items-center gap-1.5">
+                            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+                            <span className="text-[10px] font-bold text-slate-500 uppercase">{status}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={statusDistribution}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                          <XAxis 
+                            dataKey="name" 
+                            axisLine={false} 
+                            tickLine={false} 
+                            tick={{ fontSize: 10, fontWeight: 600, fill: '#94a3b8' }} 
+                          />
+                          <YAxis 
+                            axisLine={false} 
+                            tickLine={false} 
+                            tick={{ fontSize: 10, fontWeight: 600, fill: '#94a3b8' }} 
+                          />
+                          <RechartsTooltip 
+                            cursor={{ fill: '#f8fafc' }}
+                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                          />
+                          <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                            {statusDistribution.map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={COLORS[entry.name as keyof typeof COLORS] || '#cbd5e1'} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center">
+                    <div className="w-32 h-32 mb-4">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={statusDistribution}
+                            innerRadius={40}
+                            outerRadius={60}
+                            paddingAngle={5}
+                            dataKey="value"
+                          >
+                            {statusDistribution.map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={COLORS[entry.name as keyof typeof COLORS] || '#cbd5e1'} />
+                            ))}
+                          </Pie>
+                          <RechartsTooltip />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <h4 className="font-bold text-slate-800 mb-1">Utilization Rate</h4>
+                    <p className="text-3xl font-bold text-blue-600">
+                      {Math.round((tokens.filter(t => t.status === 'Used').length / tokens.length) * 100) || 0}%
+                    </p>
+                    <p className="text-xs text-slate-500 mt-2">Percentage of tokens successfully processed at gate</p>
+                  </div>
+                </div>
+
+                {/* Filters & Bulk Actions */}
                 <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-4">
                   <div className="flex items-center gap-2">
                     <Filter size={16} className="text-slate-400" />
@@ -527,8 +861,57 @@ export default function App() {
                     />
                   </div>
 
+                  <div className="h-8 w-px bg-slate-200 mx-2 hidden md:block" />
+
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <input 
+                        type="checkbox" 
+                        className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                        checked={selectedTokenIds.length === filteredTokens.length && filteredTokens.length > 0}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedTokenIds(filteredTokens.map(t => t.id));
+                          } else {
+                            setSelectedTokenIds([]);
+                          }
+                        }}
+                      />
+                      <span className="text-xs font-bold text-slate-500 uppercase">Select All</span>
+                    </div>
+
+                    <div className="relative group">
+                      <button 
+                        disabled={selectedTokenIds.length === 0}
+                        className="flex items-center gap-2 px-4 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-bold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-black transition-all"
+                      >
+                        Bulk Actions ({selectedTokenIds.length})
+                        <ChevronRight size={14} className="rotate-90" />
+                      </button>
+                      <div className="absolute top-full left-0 mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl z-20 py-2 hidden group-hover:block">
+                        <button 
+                          onClick={() => handleBulkAction('Used')}
+                          className="w-full text-left px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-blue-600 flex items-center gap-2"
+                        >
+                          <CheckCircle2 size={14} />
+                          Mark as Used
+                        </button>
+                        <button 
+                          onClick={() => handleBulkAction('Cancelled')}
+                          className="w-full text-left px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:text-rose-600 flex items-center gap-2"
+                        >
+                          <XCircle size={14} />
+                          Cancel Tokens
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   <button 
-                    onClick={() => setTokenFilters({ status: 'All', type: 'All', dateRange: { start: '', end: '' } })}
+                    onClick={() => {
+                      setTokenFilters({ status: 'All', type: 'All', dateRange: { start: '', end: '' } });
+                      setSelectedTokenIds([]);
+                    }}
                     className="ml-auto text-xs font-bold text-slate-400 hover:text-blue-600 transition-colors"
                   >
                     Reset Filters
@@ -540,6 +923,14 @@ export default function App() {
                     <TokenCard 
                       key={t.id} 
                       token={t} 
+                      isSelected={selectedTokenIds.includes(t.id)}
+                      onSelect={(selected) => {
+                        if (selected) {
+                          setSelectedTokenIds([...selectedTokenIds, t.id]);
+                        } else {
+                          setSelectedTokenIds(selectedTokenIds.filter(id => id !== t.id));
+                        }
+                      }}
                       onUpdateStatus={(token, status) => setStatusUpdate({ token, newStatus: status })}
                       onViewHistory={() => setSelectedTokenForHistory(t)}
                     />
@@ -561,6 +952,95 @@ export default function App() {
                     </button>
                   </div>
                 )}
+              </motion.div>
+            )}
+
+            {activeTab === 'gate' && (
+              <motion.div 
+                key="gate"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                className="space-y-6"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-2xl font-bold text-slate-900">Gate Activity Log</h2>
+                    <p className="text-slate-500">Real-time monitoring of terminal gate entries and cancellations</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={() => setIsManualGateModalOpen(true)}
+                      className="flex items-center gap-2 bg-white border border-slate-200 text-slate-700 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-all shadow-sm"
+                    >
+                      <Plus size={18} />
+                      Manual Log
+                    </button>
+                    <div className="bg-blue-50 px-4 py-2 rounded-lg border border-blue-100 flex items-center gap-3">
+                      <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      <span className="text-xs font-bold text-blue-700 uppercase tracking-wider">Live System Connected</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                  <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                    <h3 className="font-bold text-slate-800">Recent Gate Events</h3>
+                    <div className="flex gap-2">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase">Total Events: {gateActivity.length}</span>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead>
+                        <tr className="bg-slate-50">
+                          <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Timestamp</th>
+                          <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Gate ID</th>
+                          <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Token ID</th>
+                          <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Container</th>
+                          <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Truck Plate</th>
+                          <th className="px-6 py-4 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Event Type</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {gateActivity.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="px-6 py-12 text-center text-slate-400 italic">
+                              No gate activity recorded yet. Simulation running...
+                            </td>
+                          </tr>
+                        ) : (
+                          gateActivity.map((event) => (
+                            <motion.tr 
+                              key={event.id}
+                              initial={{ backgroundColor: 'rgba(59, 130, 246, 0.1)' }}
+                              animate={{ backgroundColor: 'transparent' }}
+                              transition={{ duration: 2 }}
+                              className="hover:bg-slate-50/50 transition-colors"
+                            >
+                              <td className="px-6 py-4 text-xs font-medium text-slate-500">
+                                {format(parseISO(event.timestamp), 'HH:mm:ss')}
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className="text-xs font-bold text-slate-700 bg-slate-100 px-2 py-1 rounded">{event.gateId}</span>
+                              </td>
+                              <td className="px-6 py-4 text-xs font-mono font-bold text-blue-600">{event.tokenId}</td>
+                              <td className="px-6 py-4 text-xs font-mono font-bold text-slate-900">{event.containerNumber}</td>
+                              <td className="px-6 py-4 text-xs font-bold text-slate-700">{event.truckPlate}</td>
+                              <td className="px-6 py-4">
+                                <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                                  event.type === 'Used' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                                }`}>
+                                  {event.type}
+                                </span>
+                              </td>
+                            </motion.tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -720,9 +1200,19 @@ export default function App() {
             token={statusUpdate.token}
             newStatus={statusUpdate.newStatus}
             onClose={() => setStatusUpdate(null)}
-            onConfirm={(note) => {
-              updateTokenStatus(statusUpdate.token.id, statusUpdate.newStatus, note);
+            onConfirm={(note, gateId) => {
+              updateTokenStatus(statusUpdate.token.id, statusUpdate.newStatus, note, gateId);
               setStatusUpdate(null);
+            }}
+          />
+        )}
+        {isManualGateModalOpen && (
+          <ManualGateEventModal 
+            tokens={tokens}
+            onClose={() => setIsManualGateModalOpen(false)}
+            onLog={(tokenId, type, note) => {
+              updateTokenStatus(tokenId, type, note);
+              setIsManualGateModalOpen(false);
             }}
           />
         )}
@@ -740,9 +1230,10 @@ function StatusUpdateModal({
   token: Token, 
   newStatus: Token['status'], 
   onClose: () => void, 
-  onConfirm: (note: string) => void 
+  onConfirm: (note: string, gateId?: string) => void 
 }) {
   const [note, setNote] = useState('');
+  const [gateId, setGateId] = useState('');
   const needsConfirmation = newStatus === 'Cancelled' || newStatus === 'Used';
 
   return (
@@ -796,14 +1287,34 @@ function StatusUpdateModal({
             </div>
           )}
 
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase">Optional Note</label>
-            <textarea 
-              placeholder="Add context for this status change..."
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-h-[100px] text-sm"
-              value={note}
-              onChange={e => setNote(e.target.value)}
-            />
+          <div className="space-y-4">
+            {newStatus === 'Used' && (
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase">Associated Gate</label>
+                <select 
+                  className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-sm"
+                  value={gateId}
+                  onChange={e => setGateId(e.target.value)}
+                >
+                  <option value="">Select a Gate (Optional)</option>
+                  <option value="GATE-1">Gate 1</option>
+                  <option value="GATE-2">Gate 2</option>
+                  <option value="GATE-3">Gate 3</option>
+                  <option value="GATE-4">Gate 4</option>
+                  <option value="GATE-5">Gate 5</option>
+                </select>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase">Optional Note</label>
+              <textarea 
+                placeholder="Add context for this status change..."
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-h-[100px] text-sm"
+                value={note}
+                onChange={e => setNote(e.target.value)}
+              />
+            </div>
           </div>
 
           <div className="flex gap-4">
@@ -814,7 +1325,7 @@ function StatusUpdateModal({
               Cancel
             </button>
             <button 
-              onClick={() => onConfirm(note)}
+              onClick={() => onConfirm(note, gateId)}
               className={`flex-1 py-3 text-white rounded-xl font-bold shadow-lg transition-all active:scale-95 ${
                 newStatus === 'Cancelled' ? 'bg-rose-600 hover:bg-rose-700 shadow-rose-500/20' : 
                 newStatus === 'Used' ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20' : 
@@ -825,6 +1336,167 @@ function StatusUpdateModal({
             </button>
           </div>
         </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function ManualGateEventModal({ 
+  tokens, 
+  onClose, 
+  onLog 
+}: { 
+  tokens: Token[], 
+  onClose: () => void, 
+  onLog: (tokenId: string, type: 'Used' | 'Cancelled', note: string) => void 
+}) {
+  const [tokenId, setTokenId] = useState('');
+  const [truckPlate, setTruckPlate] = useState('');
+  const [type, setType] = useState<'Used' | 'Cancelled'>('Used');
+  const [note, setNote] = useState('');
+  const [error, setError] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const token = tokens.find(t => t.id === tokenId);
+    
+    if (!token) {
+      setError('Invalid Token ID');
+      return;
+    }
+
+    if (token.truckPlate.toLowerCase() !== truckPlate.toLowerCase()) {
+      setError('Truck Plate mismatch for this Token ID');
+      return;
+    }
+
+    if (token.status !== 'Active') {
+      setError(`Token is already ${token.status}`);
+      return;
+    }
+
+    onLog(tokenId, type, note || `Manual gate log: ${type}`);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <motion.div 
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+      />
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden"
+      >
+        <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900">Manual Gate Log</h3>
+            <p className="text-xs text-slate-500">Record a gate event manually</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-200 rounded-lg transition-colors text-slate-500">
+            <XCircle size={20} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-8 space-y-6">
+          {error && (
+            <div className="p-3 bg-rose-50 border border-rose-100 rounded-lg flex items-center gap-2 text-rose-600 text-xs font-bold">
+              <AlertCircle size={16} />
+              {error}
+            </div>
+          )}
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase">Token ID</label>
+              <input 
+                required
+                type="text" 
+                placeholder="e.g. TKN-1234-AB"
+                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono text-sm uppercase"
+                value={tokenId}
+                onChange={e => {
+                  setTokenId(e.target.value.toUpperCase());
+                  setError('');
+                }}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase">Truck Plate</label>
+              <input 
+                required
+                type="text" 
+                placeholder="e.g. DXB-A-12345"
+                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 text-sm uppercase"
+                value={truckPlate}
+                onChange={e => {
+                  setTruckPlate(e.target.value.toUpperCase());
+                  setError('');
+                }}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase">Event Type</label>
+              <div className="flex gap-4">
+                <label className="flex-1 flex items-center justify-center gap-2 p-3 border rounded-xl cursor-pointer transition-all hover:bg-slate-50 border-slate-200 has-[:checked]:border-blue-500 has-[:checked]:bg-blue-50 has-[:checked]:text-blue-700">
+                  <input 
+                    type="radio" 
+                    name="eventType" 
+                    className="hidden" 
+                    checked={type === 'Used'} 
+                    onChange={() => setType('Used')} 
+                  />
+                  <CheckCircle2 size={16} />
+                  <span className="text-sm font-bold">Used</span>
+                </label>
+                <label className="flex-1 flex items-center justify-center gap-2 p-3 border rounded-xl cursor-pointer transition-all hover:bg-slate-50 border-slate-200 has-[:checked]:border-rose-500 has-[:checked]:bg-rose-50 has-[:checked]:text-rose-700">
+                  <input 
+                    type="radio" 
+                    name="eventType" 
+                    className="hidden" 
+                    checked={type === 'Cancelled'} 
+                    onChange={() => setType('Cancelled')} 
+                  />
+                  <XCircle size={16} />
+                  <span className="text-sm font-bold">Cancel</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase">Note (Optional)</label>
+              <textarea 
+                placeholder="Reason for manual entry..."
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 min-h-[80px] text-sm"
+                value={note}
+                onChange={e => setNote(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="flex gap-4 pt-4">
+            <button 
+              type="button"
+              onClick={onClose}
+              className="flex-1 py-3 border border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50 transition-all"
+            >
+              Cancel
+            </button>
+            <button 
+              type="submit"
+              className="flex-1 py-3 bg-slate-900 hover:bg-black text-white rounded-xl font-bold shadow-lg transition-all active:scale-95"
+            >
+              Log Event
+            </button>
+          </div>
+        </form>
       </motion.div>
     </div>
   );
@@ -870,35 +1542,73 @@ interface TokenCardProps {
   token: Token;
   onUpdateStatus: (token: Token, status: Token['status']) => void;
   onViewHistory: () => void;
+  isSelected?: boolean;
+  onSelect?: (selected: boolean) => void;
 }
 
 function TokenCard({ 
   token, 
   onUpdateStatus, 
-  onViewHistory 
+  onViewHistory,
+  isSelected,
+  onSelect
 }: TokenCardProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isOcrExpanded, setIsOcrExpanded] = useState(false);
+
+  const isExpiringSoon = useMemo(() => {
+    if (token.status !== 'Active') return false;
+    const now = new Date();
+    const apptTime = parseISO(token.appointmentTime);
+    const threshold = addHours(now, 24);
+    return isBefore(apptTime, threshold) && isBefore(now, apptTime);
+  }, [token]);
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden hover:border-blue-300 transition-all group relative">
-      <div className="p-6 flex gap-6">
+    <div className={`bg-white rounded-2xl border shadow-sm overflow-hidden transition-all group relative ${
+      isSelected ? 'border-blue-500 ring-2 ring-blue-500/20' : 'border-slate-200 hover:border-blue-300'
+    }`}>
+      {onSelect && (
+        <div className="absolute top-4 left-4 z-10">
+          <input 
+            type="checkbox" 
+            checked={isSelected}
+            onChange={(e) => onSelect(e.target.checked)}
+            className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+          />
+        </div>
+      )}
+
+      <div className={`p-6 flex gap-6 ${onSelect ? 'pl-12' : ''}`}>
         <div className="shrink-0">
-          <div className="p-2 bg-white border border-slate-100 rounded-xl shadow-sm">
+          <div className="p-2 bg-white border border-slate-100 rounded-xl shadow-sm relative">
             <img src={token.qrCode} alt="QR Code" className="w-24 h-24" />
+            {isExpiringSoon && (
+              <div className="absolute -top-2 -right-2 bg-amber-500 text-white p-1 rounded-full shadow-lg animate-bounce" title="Expiring within 24 hours">
+                <AlertCircle size={14} />
+              </div>
+            )}
           </div>
           <p className="text-center mt-2 font-mono text-[10px] font-bold text-slate-400">{token.id}</p>
         </div>
         
         <div className="flex-1 space-y-3">
           <div className="flex justify-between items-start">
-            <span className={`status-badge ${
-              token.status === 'Active' ? 'status-active' : 
-              token.status === 'Used' ? 'status-used' :
-              token.status === 'Expired' ? 'status-expired' :
-              'status-cancelled'
-            }`}>
-              {token.status}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className={`status-badge ${
+                token.status === 'Active' ? 'status-active' : 
+                token.status === 'Used' ? 'status-used' :
+                token.status === 'Expired' ? 'status-expired' :
+                'status-cancelled'
+              }`}>
+                {token.status}
+              </span>
+              {isExpiringSoon && (
+                <span className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-100">
+                  Expiring Soon
+                </span>
+              )}
+            </div>
             <div className="relative">
               <button 
                 onClick={() => setIsMenuOpen(!isMenuOpen)}
@@ -942,11 +1652,55 @@ function TokenCard({
             </div>
             <div>
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Appointment</p>
-              <p className="text-xs font-bold text-slate-700">
+              <p className={`text-xs font-bold ${isExpiringSoon ? 'text-amber-600' : 'text-slate-700'}`}>
                 {format(parseISO(token.appointmentTime), 'HH:mm')}
               </p>
             </div>
           </div>
+
+          {token.ocrData && (
+            <div className="pt-2 border-t border-slate-100 mt-2">
+              <button 
+                onClick={() => setIsOcrExpanded(!isOcrExpanded)}
+                className="flex items-center gap-2 text-[10px] font-bold text-blue-600 uppercase tracking-wider hover:text-blue-700 transition-colors"
+              >
+                <Scan size={12} />
+                OCR Data Extracted
+                {isOcrExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              </button>
+              
+              <AnimatePresence>
+                {isOcrExpanded && (
+                  <motion.div 
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: 'auto', opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="overflow-hidden"
+                  >
+                    <div className="grid grid-cols-2 gap-3 pt-3">
+                      {token.ocrData.billOfLading && (
+                        <div>
+                          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-tight">Bill of Lading</p>
+                          <p className="text-[11px] font-mono font-bold text-slate-700">{token.ocrData.billOfLading}</p>
+                        </div>
+                      )}
+                      {token.ocrData.manifestId && (
+                        <div>
+                          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-tight">Manifest ID</p>
+                          <p className="text-[11px] font-mono font-bold text-slate-700">{token.ocrData.manifestId}</p>
+                        </div>
+                      )}
+                      <div className="col-span-2">
+                        <p className="text-[8px] font-medium text-slate-400 italic">
+                          Extracted at: {format(parseISO(token.ocrData.extractedAt), 'MMM d, HH:mm')}
+                        </p>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1026,7 +1780,14 @@ function HistoryModal({ token, onClose }: { token: Token, onClose: () => void })
                 </div>
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm font-bold text-slate-900">{entry.status}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-slate-900">{entry.status}</span>
+                      {entry.gateId && (
+                        <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">
+                          {entry.gateId}
+                        </span>
+                      )}
+                    </div>
                     <span className="text-[10px] font-medium text-slate-400">{format(parseISO(entry.timestamp), 'MMM dd, HH:mm')}</span>
                   </div>
                   <p className="text-xs text-slate-600 mb-1">{entry.note}</p>
